@@ -235,43 +235,71 @@ async function initStore() {
   console.log('[store] 本地文件存储：' + STORE_FILE + (DATABASE_URL ? '（DATABASE_URL 连接失败，数据重启可能丢失）' : '（未配置 DATABASE_URL，生产请配置 Render Postgres）'));
 }
 
-async function readStore() {
-  if (storeMode === 'pg') {
-    try {
-      const r = await pgPool.query('SELECT value FROM portal_store WHERE key=$1', ['portal']);
-      if (r.rows.length === 0) return null;
-      return JSON.parse(r.rows[0].value);
-    } catch (e) { console.error('[store] PostgreSQL 读取失败：' + e.message); }
-  }
+/* 存储架构（2026-08-20 加固，解决「PUT 200 但数据读不回」）：
+   - 双写：PG 与本地文件都写。PG 失败不阻断文件写入。
+   - 读取：PG 优先；PG 无数据时回退读文件；文件有数据且 PG 可用时回填 PG。
+   - 回读自校验：writeStore 写完后立即 readStore 校验，读不到就抛错，前端才能感知失败。 */
+async function readStoreFromPg() {
+  if (storeMode !== 'pg') return null;
   try {
-    if (fs.existsSync(STORE_FILE)) return JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
-  } catch (e) { console.error('[store] 文件读取失败：' + e.message); }
+    const r = await pgPool.query('SELECT value FROM portal_store WHERE key=$1', ['portal']);
+    if (r.rows.length === 0) return null;
+    const v = JSON.parse(r.rows[0].value);
+    return (v && v.categories && v.apps) ? v : null;
+  } catch (e) { console.error('[store] PostgreSQL 读取失败：' + e.message); return null; }
+}
+function readStoreFromFile() {
+  try {
+    if (!fs.existsSync(STORE_FILE)) return null;
+    const v = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
+    return (v && v.categories && v.apps) ? v : null;
+  } catch (e) { console.error('[store] 文件读取失败：' + e.message); return null; }
+}
+async function writeStoreToPg(store) {
+  if (storeMode !== 'pg') return false;
+  try {
+    await pgPool.query(
+      'INSERT INTO portal_store (key, value, updated_at) VALUES ($1,$2,$3) ' +
+      'ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=$3',
+      ['portal', JSON.stringify(store), Date.now()]
+    );
+    return true;
+  } catch (e) { console.error('[store] PostgreSQL 写入失败：' + e.message); return false; }
+}
+function writeStoreToFile(store) {
+  try {
+    if (!fs.existsSync(path.dirname(STORE_FILE))) fs.mkdirSync(path.dirname(STORE_FILE), { recursive: true });
+    fs.writeFileSync(STORE_FILE, JSON.stringify(store, null, 2));
+    return true;
+  } catch (e) { console.error('[store] 文件写入失败：' + e.message); return false; }
+}
+
+async function readStore() {
+  let fromPg = await readStoreFromPg();
+  if (fromPg) return fromPg;
+  const fromFile = readStoreFromFile();
+  if (fromFile) {
+    // 文件有数据但 PG 没有 → 回填 PG（双写兜底自愈）
+    if (storeMode === 'pg') { writeStoreToPg(fromFile); }
+    return fromFile;
+  }
   return null;
 }
 
 async function writeStore(store) {
-  let pgErr = null;
-  if (storeMode === 'pg') {
-    try {
-      await pgPool.query(
-        'INSERT INTO portal_store (key, value, updated_at) VALUES ($1,$2,$3) ' +
-        'ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=$3',
-        ['portal', JSON.stringify(store), Date.now()]
-      );
-      return;
-    } catch (e) {
-      pgErr = e;
-      console.error('[store] PostgreSQL 写入失败，回退本地文件存储：' + e.message);
-    }
+  const pgOk = await writeStoreToPg(store);   // PG 失败不阻断
+  const fileOk = writeStoreToFile(store);     // 文件始终写（双保险）
+  if (!pgOk && !fileOk) {
+    throw new Error('数据存储失败：PostgreSQL 与本地文件均写入失败');
   }
-  try {
-    if (!fs.existsSync(path.dirname(STORE_FILE))) fs.mkdirSync(path.dirname(STORE_FILE), { recursive: true });
-    fs.writeFileSync(STORE_FILE, JSON.stringify(store, null, 2));
-    if (pgErr) console.warn('[store] 已回退写入本地文件，PG 异常原因：' + pgErr.message);
-  } catch (e) {
-    console.error('[store] 文件写入失败：' + e.message);
-    throw new Error('数据存储失败：' + (pgErr ? pgErr.message + '; ' : '') + e.message);
+  // 回读自校验：写入后必须能读回，否则视为失败（杜绝「PUT 200 但数据丢失」）
+  const back = await readStore();
+  if (!back || (back.version !== store.version) ||
+      (back.categories || []).length !== (store.categories || []).length ||
+      (back.apps || []).length !== (store.apps || []).length) {
+    throw new Error('数据写入后无法读回（存储不一致），请检查 DATABASE_URL 配置或磁盘权限');
   }
+  if (!pgOk) console.warn('[store] PG 不可用，已写本地文件（部署/重启会丢，请配置 DATABASE_URL）');
 }
 
 function isAuthed(req) {
@@ -328,8 +356,33 @@ const server = http.createServer(async (req, res) => {
   // GET：无需鉴权（内部系统，数据不敏感）；PUT：必须已登录（wecom. / admin. token）
   if (url === '/api/portal-data' && req.method === 'GET') {
     let store = await readStore();
-    if (!store) { store = JSON.parse(JSON.stringify(DEFAULT_STORE)); await writeStore(store); }
-    json(200, store);
+    // 空库时不再写 DEFAULT_STORE（避免 GET 覆盖掉文件兜底里的数据）
+    json(200, store || JSON.parse(JSON.stringify(DEFAULT_STORE)));
+    return;
+  }
+  // 存储诊断端点（内部排查用）：查看存储模式 / PG 状态 / 文件状态 / 当前数据摘要
+  if (url === '/api/store/status' && req.method === 'GET') {
+    const fileInfo = fs.existsSync(STORE_FILE) ? { exists: true, bytes: fs.statSync(STORE_FILE).size } : { exists: false };
+    let pgOk = null;
+    if (storeMode === 'pg') {
+      try {
+        const r = await pgPool.query('SELECT 1 AS ok');
+        pgOk = r.rows.length > 0;
+      } catch (e) { pgOk = false; }
+    }
+    const store = await readStore();
+    json(200, {
+      storeMode,
+      pgOk,
+      file: fileInfo,
+      store: store ? {
+        version: store.version,
+        categories: (store.categories || []).length,
+        apps: (store.apps || []).length,
+        trash: (store.trash || []).length
+      } : null,
+      tip: storeMode === 'file' ? '当前为文件存储，Render 部署/重启会丢数据，请配置 DATABASE_URL' : 'PostgreSQL 存储'
+    });
     return;
   }
   if (url === '/api/portal-data' && req.method === 'PUT') {
