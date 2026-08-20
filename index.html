@@ -2692,6 +2692,7 @@ async function loadAllData() {
   state.users = (await api.get('/users')).users || [];   // 通讯录：在线读后端企微数据，离线 fallback mock
   await loadPortalData();
   await applyDefaultCategoryVisibility();
+  await applyDefaultAppVisibility();
   loadUserAppSort();
   loadUserCatSort();
 }
@@ -2714,6 +2715,39 @@ async function applyDefaultCategoryVisibility() {
   });
   if (!changed) { localStorage.setItem(PATCH_KEY, '1'); return; }
   offlineBackend._write(LS_CATS, state.categories);
+  if (!state.offline) {
+    try {
+      await api.put('/portal-data', { version: state.syncVersion, categories: state.categories, apps: state.apps, trash: state.trash });
+      state.syncVersion += 1;
+      localStorage.setItem(LS_SYNCVER, String(state.syncVersion));
+    } catch (e) { return; }                          // 同步失败不记标记，下次启动重试
+  } else {
+    return;                                          // 离线模式不记标记，等在线后再同步
+  }
+  localStorage.setItem(PATCH_KEY, '1');
+}
+
+/* 一次性补丁：应用默认全公司可见。
+   规则：只要应用当前勾选的可见部门数量少于当前部门总数，就补齐为「全部部门可见」。
+   已手动全选或多选过的应用不动；已打过补丁的浏览器不再执行。 */
+async function applyDefaultAppVisibility() {
+  const PATCH_KEY = 'aqt_portal_v2_appvis_default_patched';
+  if (isClient(state.user) || localStorage.getItem(PATCH_KEY)) return;
+  const deptIds = (state.departments || []).map(d => d.id);
+  if (!deptIds.length || !state.apps) return;       // 部门/应用未加载，等下次启动再试
+  let changed = false;
+  state.apps.forEach(app => {
+    const ids = app.visibility_dept_ids || [];
+    if (ids.length < deptIds.length) {
+      // 保留原有勾选，补齐缺失部门（去重）
+      const set = new Set(ids);
+      deptIds.forEach(d => set.add(d));
+      app.visibility_dept_ids = Array.from(set);
+      changed = true;
+    }
+  });
+  if (!changed) { localStorage.setItem(PATCH_KEY, '1'); return; }
+  offlineBackend._write(LS_APPS, state.apps);
   if (!state.offline) {
     try {
       await api.put('/portal-data', { version: state.syncVersion, categories: state.categories, apps: state.apps, trash: state.trash });
@@ -3331,7 +3365,8 @@ function renderVisPanel(app) {
   panel.classList.toggle('disabled', !canEdit);
   lockNote.style.display = canEdit ? 'none' : 'block';
 
-  const checkedDepts = new Set(app ? (app.visibility_dept_ids || []) : []);
+  // 新建应用默认「全公司可见」：所有部门勾选；人员列表不单独勾选（按部门授权已覆盖全员）
+  const checkedDepts = new Set(app ? (app.visibility_dept_ids || []) : (state.departments || []).map(d => d.id));
   const checkedUsers = new Set(app ? (app.visibility_user_ids || []) : []);
 
   // 客户可见开关（新建默认关闭；编辑回显）
