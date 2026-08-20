@@ -93,6 +93,34 @@
 
   .topbar-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
 
+  /* ===== 数据未同步提示条 ===== */
+  .sync-banner {
+    background: #FFF2F0;
+    border-bottom: 1px solid #FFCCC7;
+    color: #CF1322;
+    padding: 10px 16px;
+    font-size: 13px;
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .sync-banner.show { display: flex; }
+  .sync-banner-left { display: flex; align-items: center; gap: 8px; }
+  .sync-banner-icon {
+    width: 18px; height: 18px; border-radius: 50%;
+    background: #FF4D4F; color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700; flex-shrink: 0;
+  }
+  .sync-banner-text { line-height: 1.5; }
+  .sync-banner .btn {
+    background: #FF4D4F; color: #fff; border: none;
+    padding: 5px 12px; border-radius: 4px; font-size: 12px; cursor: pointer;
+    white-space: nowrap;
+  }
+  .sync-banner .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
   .role-badge {
     display: inline-flex; align-items: center; gap: 5px;
     padding: 4px 9px; border-radius: 20px;
@@ -919,6 +947,15 @@
 
       <input type="file" id="importFileInput" accept=".json" style="display:none;">
     </div>
+  </div>
+
+  <!-- 数据未同步提示条（仅全局管理员可见） -->
+  <div class="sync-banner" id="syncBanner">
+    <div class="sync-banner-left">
+      <div class="sync-banner-icon">!</div>
+      <div class="sync-banner-text" id="syncBannerText">检测到本地有数据未同步到服务端，其他用户可能看不到。</div>
+    </div>
+    <button class="btn" id="syncBannerBtn">立即同步</button>
   </div>
 
   <div class="main">
@@ -2784,6 +2821,7 @@ async function loadPortalData() {
         offlineBackend._write(LS_APPS, state.apps);
         offlineBackend._write(LS_TRASH, state.trash);
         localStorage.setItem(LS_SYNCVER, String(state.syncVersion));
+        hideSyncBanner();
       } else {
         // 服务端为空：把本地数据（种子或用户已建内容）推送上去，完成首次初始化。
         // 客户（未登录、无写权限）不触发迁移，只读展示本地缓存/种子，避免 401 被登出。
@@ -2803,12 +2841,19 @@ async function loadPortalData() {
           apps: offlineBackend.listApps(),
           trash: offlineBackend.listTrash()
         };
-        await api.put('/portal-data', local);
-        state.categories = local.categories;
-        state.apps = local.apps;
-        state.trash = local.trash;
-        state.syncVersion = (remote.version || 1) + 1;
-        localStorage.setItem(LS_SYNCVER, String(state.syncVersion));
+        try {
+          await api.put('/portal-data', local);
+          state.categories = local.categories;
+          state.apps = local.apps;
+          state.trash = local.trash;
+          state.syncVersion = (remote.version || 1) + 1;
+          localStorage.setItem(LS_SYNCVER, String(state.syncVersion));
+          hideSyncBanner();
+        } catch (putErr) {
+          console.error('首次迁移到服务端失败', putErr);
+          showSyncBanner('首次自动迁移失败：' + (putErr.message || '服务端写入异常'));
+          throw putErr;
+        }
       }
     }
   } catch (e) {
@@ -2817,6 +2862,60 @@ async function loadPortalData() {
     state.categories = offlineBackend.listCategories();
     state.apps = offlineBackend.listApps();
     state.trash = offlineBackend.listTrash();
+    // 在线模式但服务端为空/写入失败：提示管理员手动同步
+    if (!state.offline && isSuperAdmin(state.user)) {
+      showSyncBanner(e.message ? String(e.message) : '');
+    }
+  }
+}
+
+/* ---------- 数据同步提示条 ---------- */
+function showSyncBanner(reason) {
+  if (!isSuperAdmin(state.user) || state.offline) return;
+  const localApps = (state.apps || []).length;
+  const localCats = (state.categories || []).length;
+  if (!localApps && !localCats) return;
+  const banner = document.getElementById('syncBanner');
+  const text = document.getElementById('syncBannerText');
+  if (!banner || !text) return;
+  text.textContent = '检测到本地有 ' + localCats + ' 个分类、' + localApps + ' 个应用未同步到服务端，其他用户可能看不到。' + (reason || '');
+  banner.classList.add('show');
+}
+function hideSyncBanner() {
+  const banner = document.getElementById('syncBanner');
+  if (banner) banner.classList.remove('show');
+}
+
+async function forceSyncToServer() {
+  if (!isSuperAdmin(state.user) || state.offline) { showToast('当前不在线或无权限同步'); return; }
+  const btn = document.getElementById('syncBannerBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '同步中…'; }
+  try {
+    const body = {
+      version: state.syncVersion || 1,
+      categories: offlineBackend.listCategories(),
+      apps: offlineBackend.listApps(),
+      trash: offlineBackend.listTrash()
+    };
+    const data = await api.put('/portal-data', body);
+    if (data && (data.ok || data.version)) {
+      state.syncVersion = data.version || (state.syncVersion || 1) + 1;
+      localStorage.setItem(LS_SYNCVER, String(state.syncVersion));
+      hideSyncBanner();
+      showToast('同步成功，其他用户刷新后即可看到');
+      // 同步成功后刷新本地状态为服务端最新
+      await loadPortalData();
+      renderSidebar();
+      renderCards();
+    } else {
+      throw new Error('服务端未返回成功状态');
+    }
+  } catch (e) {
+    console.error('forceSyncToServer', e);
+    showToast('同步失败：' + (e.message || '请检查网络或联系管理员'));
+    showSyncBanner('同步失败：' + (e.message || '未知错误'));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '立即同步'; }
   }
 }
 
@@ -4509,6 +4608,9 @@ function bindEvents() {
   document.getElementById('roleToggleBtn').addEventListener('click', () => {
     if (confirm('退出当前登录？')) doLogout();
   });
+
+  /* 数据同步提示条 */
+  document.getElementById('syncBannerBtn').addEventListener('click', forceSyncToServer);
 
   /* 管理员登录入口（进入后切换身份） */
   document.getElementById('adminLoginBtn').addEventListener('click', openAdminLogin);

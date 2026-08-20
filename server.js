@@ -250,6 +250,7 @@ async function readStore() {
 }
 
 async function writeStore(store) {
+  let pgErr = null;
   if (storeMode === 'pg') {
     try {
       await pgPool.query(
@@ -258,12 +259,19 @@ async function writeStore(store) {
         ['portal', JSON.stringify(store), Date.now()]
       );
       return;
-    } catch (e) { console.error('[store] PostgreSQL 写入失败：' + e.message); }
+    } catch (e) {
+      pgErr = e;
+      console.error('[store] PostgreSQL 写入失败，回退本地文件存储：' + e.message);
+    }
   }
   try {
     if (!fs.existsSync(path.dirname(STORE_FILE))) fs.mkdirSync(path.dirname(STORE_FILE), { recursive: true });
     fs.writeFileSync(STORE_FILE, JSON.stringify(store, null, 2));
-  } catch (e) { console.error('[store] 文件写入失败：' + e.message); }
+    if (pgErr) console.warn('[store] 已回退写入本地文件，PG 异常原因：' + pgErr.message);
+  } catch (e) {
+    console.error('[store] 文件写入失败：' + e.message);
+    throw new Error('数据存储失败：' + (pgErr ? pgErr.message + '; ' : '') + e.message);
+  }
 }
 
 function isAuthed(req) {
@@ -343,7 +351,13 @@ const server = http.createServer(async (req, res) => {
       apps: Array.isArray(body.apps) ? body.apps : store.apps,
       trash: Array.isArray(body.trash) ? body.trash : store.trash
     };
-    await writeStore(store);
+    try {
+      await writeStore(store);
+    } catch (e) {
+      console.error('[portal-data] PUT 写入失败：', e.message);
+      json(500, { error: '服务端存储失败：' + e.message });
+      return;
+    }
     json(200, { ok: true, version: store.version });
     return;
   }
