@@ -1,0 +1,25 @@
+# 凭证文件，不提交
+.env
+
+# 依赖
+node_modules/
+
+# 日志
+*.log
+
+# 工作助手临时文件
+.workbuddy/
+
+# 临时测试脚本
+_check_main.js
+_smoke_test.js
+
+# 无关项目文件
+学习乐园.html
+后端数据表变更清单.md
+# 运行时数据（服务端持久化文件，不提交）
+data/
+_client_test.js
+_seed_protect_test.js
+_empty_store_test.js
+_catvis_patch_test.js

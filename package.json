@@ -1,0 +1,16 @@
+{
+  "name": "aqt-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "爱优特应用门户（Cloudflare Pages 部署：前端静态 + Functions API）",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "npx wrangler pages dev ."
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}

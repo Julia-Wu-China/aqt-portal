@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: aqt-portal
+    runtime: node
+    plan: free
+    startCommand: node server.js
+    envVars:
+      - key: WECOM_CORPID
+      - key: WECOM_CONTACT_SECRET
+      - key: WECOM_APP_SECRET
+      - key: WECOM_AGENT_ID
