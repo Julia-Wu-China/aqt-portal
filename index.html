@@ -2842,11 +2842,13 @@ async function loadPortalData() {
           trash: offlineBackend.listTrash()
         };
         try {
-          await api.put('/portal-data', local);
+          const putRes = await api.put('/portal-data', local);
           state.categories = local.categories;
           state.apps = local.apps;
           state.trash = local.trash;
-          state.syncVersion = (remote.version || 1) + 1;
+          // 必须以服务端返回的 version 为准（空库特许写入可能返回 1，而 remote.version 是 2 之类旧值，
+          // 若用 remote.version+1 会导致本地 syncVersion 与服务端不一致，下次写操作触发 409）
+          state.syncVersion = (putRes && putRes.version) || (remote.version || 1) + 1;
           localStorage.setItem(LS_SYNCVER, String(state.syncVersion));
           hideSyncBanner();
         } catch (putErr) {
