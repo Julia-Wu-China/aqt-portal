@@ -385,10 +385,20 @@ const server = http.createServer(async (req, res) => {
       } catch (e) { pgOk = false; }
     }
     const store = await readStore();
+    let backupInfo = { exists: false };
+    try {
+      if (storeMode === 'pg') {
+        const br = await pgPool.query('SELECT updated_at FROM portal_store_backup WHERE key=$1', ['portal']);
+        if (br.rows.length > 0) backupInfo = { exists: true, updated_at: br.rows[0].updated_at };
+      }
+      const backupFile = STORE_FILE.replace('.json', '-backup.json');
+      if (fs.existsSync(backupFile)) backupInfo.file = { exists: true, bytes: fs.statSync(backupFile).size };
+    } catch (e) { backupInfo.error = e.message; }
     json(200, {
       storeMode,
       pgOk,
       file: fileInfo,
+      backup: backupInfo,
       store: store ? {
         version: store.version,
         categories: (store.categories || []).length,
