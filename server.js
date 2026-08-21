@@ -258,7 +258,10 @@ async function readStoreFromPg() {
   try {
     const r = await pgPool.query('SELECT value FROM portal_store WHERE key=$1', ['portal']);
     if (r.rows.length === 0) return null;
-    const v = JSON.parse(r.rows[0].value);
+    // 注意：node-postgres 对 jsonb 列默认已自动解析为对象，不能再 JSON.parse（会抛 TypeError）。
+    // 兼容驱动返回字符串的情况（如部分代理/池配置）。
+    const raw = r.rows[0].value;
+    const v = (typeof raw === 'string') ? JSON.parse(raw) : raw;
     return (v && v.categories && v.apps) ? v : null;
   } catch (e) { console.error('[store] PostgreSQL 读取失败：' + e.message); return null; }
 }
@@ -308,7 +311,9 @@ async function readBackup() {
     try {
       const r = await pgPool.query('SELECT value FROM portal_store_backup WHERE key=$1', ['portal']);
       if (r.rows.length > 0) {
-        const v = JSON.parse(r.rows[0].value);
+        // 与 readStoreFromPg 相同：jsonb 已被 pg 驱动解析为对象，避免二次 JSON.parse
+        const raw = r.rows[0].value;
+        const v = (typeof raw === 'string') ? JSON.parse(raw) : raw;
         if (v && v.categories && v.apps) return v;
       }
     } catch (e) { console.error('[store] 备份表读取失败：' + e.message); }
