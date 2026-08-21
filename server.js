@@ -300,6 +300,29 @@ async function readStore() {
   return null;
 }
 
+/* 回退读取备份：主存储（PG+文件）都读不到时，尝试从备份恢复现场数据。
+   用途：防止 Render 免费 PG 假空 / 实例重启丢文件时，把"空库"返回给前端，
+   触发种子注入（种子 apps=[]）把真实数据覆盖成 0 应用。 */
+async function readBackup() {
+  if (storeMode === 'pg') {
+    try {
+      const r = await pgPool.query('SELECT value FROM portal_store_backup WHERE key=$1', ['portal']);
+      if (r.rows.length > 0) {
+        const v = JSON.parse(r.rows[0].value);
+        if (v && v.categories && v.apps) return v;
+      }
+    } catch (e) { console.error('[store] 备份表读取失败：' + e.message); }
+  }
+  try {
+    const backupFile = STORE_FILE.replace('.json', '-backup.json');
+    if (fs.existsSync(backupFile)) {
+      const v = JSON.parse(fs.readFileSync(backupFile, 'utf8'));
+      if (v && v.categories && v.apps) return v;
+    }
+  } catch (e) { console.error('[store] 备份文件读取失败：' + e.message); }
+  return null;
+}
+
 async function writeStore(store) {
   const pgOk = await writeStoreToPg(store);   // PG 失败不阻断
   const fileOk = writeStoreToFile(store);     // 文件始终写（双保险）
@@ -370,8 +393,27 @@ const server = http.createServer(async (req, res) => {
   // GET：无需鉴权（内部系统，数据不敏感）；PUT：必须已登录（wecom. / admin. token）
   if (url === '/api/portal-data' && req.method === 'GET') {
     let store = await readStore();
-    // 空库时不再写 DEFAULT_STORE（避免 GET 覆盖掉文件兜底里的数据）
-    json(200, store || JSON.parse(JSON.stringify(DEFAULT_STORE)));
+    // 空库保护（2026-08-21 加固）：主存储读不到且备份有历史数据时，返回 503 而不是"假空"。
+    // 前端收到 503 会保留本地数据并提示，绝不触发种子迁移覆盖（种子 apps=[] 曾导致应用全丢）。
+    if (!store) {
+      const backup = await readBackup();
+      if (backup) {
+        json(503, {
+          error: '数据暂不可用（存储恢复中），请稍后刷新页面',
+          backup: {
+            version: backup.version,
+            categories: (backup.categories || []).length,
+            apps: (backup.apps || []).length,
+            trash: (backup.trash || []).length
+          }
+        });
+        return;
+      }
+      // 备份也没有：真空库（全新部署），正常返回空结构
+      json(200, JSON.parse(JSON.stringify(DEFAULT_STORE)));
+      return;
+    }
+    json(200, store);
     return;
   }
   // 存储诊断端点（内部排查用）：查看存储模式 / PG 状态 / 文件状态 / 当前数据摘要
@@ -428,6 +470,15 @@ const server = http.createServer(async (req, res) => {
     if (currentApps > 0 && incomingApps === 0 && query.get('force') !== '1') {
       json(400, { error: '检测到清空全部应用的操作，已被拒绝。如需强制清空，请在请求中添加 ?force=1' });
       return;
+    }
+    // 空库防覆盖（2026-08-21 加固，第二道保险）：主存储当前读不到数据（PG 假空/文件丢失），
+    // 但备份里有历史数据时，拒绝 0 应用写入。防止前端种子注入（种子 apps=[]）把真实数据覆盖掉。
+    if (incomingApps === 0 && !hasData) {
+      const backup = await readBackup();
+      if (backup && ((backup.apps || []).length > 0 || (backup.categories || []).length > 0) && query.get('force') !== '1') {
+        json(400, { error: '服务端暂未读取到主存储数据（可能存储恢复中），为避免覆盖历史数据已拒绝写入。请刷新页面重试；如确需强制覆盖，请使用 ?force=1' });
+        return;
+      }
     }
     // 写入前先把旧数据备份（本地文件也备份一份）
     const oldStore = JSON.parse(JSON.stringify(store));

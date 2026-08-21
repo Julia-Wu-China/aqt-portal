@@ -2359,6 +2359,8 @@ const api = {
       return data;
     } catch (e) {
       if (e.wecomIpBlocked) throw e;   // 60020 不降级离线
+      // 503 = 服务端数据暂不可用（存储恢复中）：不降级离线、不读假空，由调用方保留本地数据并提示
+      if (e.status === 503) throw e;
       if (method === 'GET') { state.offline = true; return this._offline(method, path, body); }
       throw e;
     }
