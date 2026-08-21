@@ -14,7 +14,8 @@ const fs = require('fs');
 const path = require('path');
 
 const API_BASE = 'https://aqtapp.airquality.com.cn';
-const BACKUP_DIR = process.argv[2] || path.join('D:', 'Desktop', '爱优特门户备份');
+// 默认备份目录：企业微信微盘同步目录（可被命令行参数覆盖，便于测试）
+const BACKUP_DIR = process.argv[2] || path.join('C:', 'Users', 'Administrator', 'Documents', 'WXWork', '1688853016410099', 'WeDrive', '爱优特', '销售部 Sales', '08 自动选型 Automatic model selection', 'AI开发', '爱优特门户应用aqt-portal-deploy-20260818', '备份包');
 const KEEP = 30;
 
 function getData() {
