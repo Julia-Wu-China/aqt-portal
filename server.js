@@ -428,10 +428,18 @@ const server = http.createServer(async (req, res) => {
     }
     const store = await readStore();
     let backupInfo = { exists: false };
+    let pgDiag = null;
     try {
       if (storeMode === 'pg') {
         const br = await pgPool.query('SELECT updated_at FROM portal_store_backup WHERE key=$1', ['portal']);
         if (br.rows.length > 0) backupInfo = { exists: true, updated_at: br.rows[0].updated_at };
+        // 深度诊断：直接查两张表的行数与 value 摘要（排查主表写入是否真的落盘）
+        const mainRow = await pgPool.query('SELECT key, length(value::text) AS len, left(value::text, 120) AS head FROM portal_store WHERE key=$1', ['portal']);
+        const bakRow = await pgPool.query('SELECT key, length(value::text) AS len, left(value::text, 120) AS head FROM portal_store_backup WHERE key=$1', ['portal']);
+        pgDiag = {
+          mainTable: mainRow.rows.length > 0 ? { len: mainRow.rows[0].len, head: mainRow.rows[0].head } : { len: 0, head: '(无行)' },
+          backupTable: bakRow.rows.length > 0 ? { len: bakRow.rows[0].len, head: bakRow.rows[0].head } : { len: 0, head: '(无行)' }
+        };
       }
       const backupFile = STORE_FILE.replace('.json', '-backup.json');
       if (fs.existsSync(backupFile)) backupInfo.file = { exists: true, bytes: fs.statSync(backupFile).size };
@@ -441,6 +449,7 @@ const server = http.createServer(async (req, res) => {
       pgOk,
       file: fileInfo,
       backup: backupInfo,
+      pgDiag,
       store: store ? {
         version: store.version,
         categories: (store.categories || []).length,
