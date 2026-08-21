@@ -24,6 +24,7 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 // ===== 凭证配置 =====
 const CORPID = process.env.WECOM_CORPID || '';
@@ -133,15 +134,25 @@ function parseToken(token) {
   try { return JSON.parse(Buffer.from(token.replace(/^wecom\./, ''), 'base64').toString()); }
   catch { return null; }
 }
-// 管理员 token：独立前缀 admin.，内容为 {userId:'portal_admin', ts}
+// 管理员 token：独立前缀 admin.，payload 为 {userId:'portal_admin', ts} 的 base64，
+// 并附带 HMAC-SHA256 签名（密钥为 ADMIN_PASSWORD）。无密码或签名错误均视为无效，
+// 防止任何人构造 admin token 调用管理接口。
 function makeAdminToken() {
-  const payload = JSON.stringify({ userId: 'portal_admin', ts: Date.now() });
-  return 'admin.' + Buffer.from(payload).toString('base64');
+  if (!ADMIN_PASSWORD) return null;
+  const payload = Buffer.from(JSON.stringify({ userId: 'portal_admin', ts: Date.now() })).toString('base64');
+  const sig = crypto.createHmac('sha256', ADMIN_PASSWORD).update(payload).digest('hex').slice(0, 16);
+  return 'admin.' + payload + '.' + sig;
 }
 function parseAdminToken(token) {
   if (!token || !token.startsWith('admin.')) return null;
+  if (!ADMIN_PASSWORD) return null;
   try {
-    const p = JSON.parse(Buffer.from(token.replace(/^admin\./, ''), 'base64').toString());
+    const parts = token.replace(/^admin\./, '').split('.');
+    if (parts.length !== 2) return null;
+    const [payload, sig] = parts;
+    const expect = crypto.createHmac('sha256', ADMIN_PASSWORD).update(payload).digest('hex').slice(0, 16);
+    if (sig !== expect) return null;
+    const p = JSON.parse(Buffer.from(payload, 'base64').toString());
     return (p && p.userId === 'portal_admin') ? p : null;
   } catch { return null; }
 }
@@ -224,6 +235,9 @@ async function initStore() {
     try {
       await pgPool.query(
         'CREATE TABLE IF NOT EXISTS portal_store (key TEXT PRIMARY KEY, value JSONB NOT NULL, updated_at BIGINT NOT NULL)'
+      );
+      await pgPool.query(
+        'CREATE TABLE IF NOT EXISTS portal_store_backup (key TEXT PRIMARY KEY, value JSONB NOT NULL, updated_at BIGINT NOT NULL)'
       );
       console.log('[store] PostgreSQL 存储就绪');
       return;
@@ -397,6 +411,29 @@ const server = http.createServer(async (req, res) => {
       json(409, Object.assign({ error: '数据已被他人修改' }, store));
       return;
     }
+    // 破坏性变更保护：当前存在应用且请求把 apps 清空时，拒绝写入（防止误操作/恶意清空）。
+    // 仅当 URL 带 ?force=1 时允许。
+    const currentApps = (store.apps || []).length;
+    const incomingApps = Array.isArray(body.apps) ? body.apps.length : currentApps;
+    if (currentApps > 0 && incomingApps === 0 && query.get('force') !== '1') {
+      json(400, { error: '检测到清空全部应用的操作，已被拒绝。如需强制清空，请在请求中添加 ?force=1' });
+      return;
+    }
+    // 写入前先把旧数据备份（本地文件也备份一份）
+    const oldStore = JSON.parse(JSON.stringify(store));
+    try {
+      if (storeMode === 'pg') {
+        await pgPool.query(
+          'INSERT INTO portal_store_backup (key, value, updated_at) VALUES ($1,$2,$3) ' +
+          'ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=$3',
+          ['portal', JSON.stringify(oldStore), Date.now()]
+        );
+      }
+      const backupFile = STORE_FILE.replace('.json', '-backup.json');
+      fs.writeFileSync(backupFile, JSON.stringify(oldStore, null, 2));
+    } catch (backupErr) {
+      console.error('[portal-data] 备份失败（继续写入）：', backupErr.message);
+    }
     // 空库特许：没有任何真实数据时允许任意 version 写入（解决首次初始化/存储漂移导致的版本号不一致）
     store = {
       version: hasData ? store.version + 1 : 1,
@@ -404,6 +441,19 @@ const server = http.createServer(async (req, res) => {
       apps: Array.isArray(body.apps) ? body.apps : store.apps,
       trash: Array.isArray(body.trash) ? body.trash : store.trash
     };
+    try {
+      if (storeMode === 'pg') {
+        await pgPool.query(
+          'INSERT INTO portal_store_backup (key, value, updated_at) VALUES ($1,$2,$3) ' +
+          'ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=$3',
+          ['portal', JSON.stringify(store), Date.now()]
+        );
+      }
+      const backupFile = STORE_FILE.replace('.json', '-backup.json');
+      fs.writeFileSync(backupFile, JSON.stringify(store, null, 2));
+    } catch (backupErr) {
+      console.error('[portal-data] 备份失败（继续写入）：', backupErr.message);
+    }
     try {
       await writeStore(store);
     } catch (e) {
