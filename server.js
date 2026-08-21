@@ -434,11 +434,12 @@ const server = http.createServer(async (req, res) => {
         const br = await pgPool.query('SELECT updated_at FROM portal_store_backup WHERE key=$1', ['portal']);
         if (br.rows.length > 0) backupInfo = { exists: true, updated_at: br.rows[0].updated_at };
         // 深度诊断：直接查两张表的行数与 value 摘要（排查主表写入是否真的落盘）
-        const mainRow = await pgPool.query('SELECT key, length(value::text) AS len, left(value::text, 120) AS head FROM portal_store WHERE key=$1', ['portal']);
-        const bakRow = await pgPool.query('SELECT key, length(value::text) AS len, left(value::text, 120) AS head FROM portal_store_backup WHERE key=$1', ['portal']);
+        const mainRow = await pgPool.query("SELECT key, updated_at, length(value::text) AS len, left(value::text, 120) AS head, (SELECT string_agg(k, ',') FROM jsonb_object_keys(value::jsonb) k) AS keys FROM portal_store WHERE key=$1", ['portal']);
+        const bakRow = await pgPool.query("SELECT key, updated_at, length(value::text) AS len, left(value::text, 120) AS head, (SELECT string_agg(k, ',') FROM jsonb_object_keys(value::jsonb) k) AS keys FROM portal_store_backup WHERE key=$1", ['portal']);
         pgDiag = {
-          mainTable: mainRow.rows.length > 0 ? { len: mainRow.rows[0].len, head: mainRow.rows[0].head } : { len: 0, head: '(无行)' },
-          backupTable: bakRow.rows.length > 0 ? { len: bakRow.rows[0].len, head: bakRow.rows[0].head } : { len: 0, head: '(无行)' }
+          mainTable: mainRow.rows.length > 0 ? { updated_at: mainRow.rows[0].updated_at, len: mainRow.rows[0].len, keys: mainRow.rows[0].keys, head: mainRow.rows[0].head } : { len: 0, head: '(无行)' },
+          backupTable: bakRow.rows.length > 0 ? { updated_at: bakRow.rows[0].updated_at, len: bakRow.rows[0].len, keys: bakRow.rows[0].keys, head: bakRow.rows[0].head } : { len: 0, head: '(无行)' },
+          now: Date.now()
         };
       }
       const backupFile = STORE_FILE.replace('.json', '-backup.json');
