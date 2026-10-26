@@ -32,7 +32,7 @@ const WB_DIR = __dirname;                       // 当前（微盘）文件夹
 const REPO_DIR = path.join(os.homedir(), '.aqt-portal-git'); // 本地中转仓库（不在微盘里）
 
 // 不同步/不推送的目录或文件（顶层名称匹配）
-const EXCLUDE = new Set(['.git', '备份包', 'data', '.env', 'node_modules', '.WeDrive', 'README-部署说明.md']);
+const EXCLUDE = new Set(['.git', '备份包', 'data', '.env', 'node_modules', '.WeDrive', '.workbuddy', 'README-部署说明.md']);
 
 function sh(cmd, cwd) {
   console.log('\n$ ' + cmd);

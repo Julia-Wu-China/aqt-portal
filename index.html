@@ -372,6 +372,11 @@
   }
   .card-action-btn:hover { background: var(--bg-tertiary); color: var(--text-primary); }
   .card-action-btn.delete:hover { background: var(--red-bg); color: var(--red); }
+  .card-action-btn.hide:hover { background: var(--accent-soft); color: var(--accent); }
+  .card-action-btn.restore:hover { background: var(--accent-soft); color: var(--accent); }
+  /* 「已隐藏」视图：操作按钮（恢复显示）常驻可见，无需悬停 */
+  .card-grid.hidden-view .card-actions { opacity: 1; }
+  .card-grid.hidden-view .app-card { border-style: dashed; }
 
   .card-top { display: flex; align-items: flex-start; gap: 10px; }
   .card-icon {
@@ -968,6 +973,12 @@
         <span class="cat-name">全部应用</span>
         <span class="cat-count" id="countAll">0</span>
       </div>
+      <div class="cat-item" data-category="hidden" id="hiddenItem" style="display:none;">
+        <span class="cat-toggle spacer"></span>
+        <div class="cat-dot" style="background:var(--text-tertiary)"></div>
+        <span class="cat-name">已隐藏</span>
+        <span class="cat-count" id="countHidden">0</span>
+      </div>
       <div class="sidebar-label" style="margin-top:8px;">应用分类</div>
       <div id="categoryTree"></div>
     </div>
@@ -1414,6 +1425,7 @@ const state = {
   catMgrSelectedUids: new Set(),
   syncVersion: 1,        // 服务端数据版本（乐观锁）
   trash: [],             // 回收站（在线模式从服务端加载）
+  userHidden: [],         // 当前用户隐藏的应用 id 列表（仅本人本地生效，不影响他人）
   offline: API_BASE === null
 };
 
@@ -1590,6 +1602,10 @@ function getEditableCategories(u) {
 /** 当前用户可见的应用 / 分类（渲染入口统一使用） */
 function visibleApps() {
   let apps = state.apps.filter(a => canSeeApp(a, state.user));
+  // 排除当前用户主动隐藏的应用（隐藏=不在主视图出现，但仍可在「已隐藏」中打开）
+  if (state.userHidden && state.userHidden.length) {
+    apps = apps.filter(a => state.userHidden.indexOf(a.id) === -1);
+  }
   const order = state.userAppSort;
   if (order && order.length) {
     apps.sort((a, b) => {
@@ -1638,6 +1654,34 @@ function saveUserCatSort(ids) {
   if (!state.user) return;
   localStorage.setItem(userCatSortKey(), JSON.stringify(ids));
   state.userCatSort = ids;
+}
+
+/* ===== 应用隐藏：仅本人本地生效，不影响他人（跟随登录身份，存 localStorage） ===== */
+function userHiddenKey() { return 'aqt_portal_v2_user_hidden_' + (state.user && state.user.wecom_userid); }
+function loadUserHidden() {
+  state.userHidden = [];
+  // 客户 / 未登录用户没有稳定身份，不启用隐藏
+  if (!state.user || !state.user.wecom_userid) return;
+  try { state.userHidden = JSON.parse(localStorage.getItem(userHiddenKey())) || []; } catch (e) {}
+}
+function saveUserHidden() {
+  if (!state.user || !state.user.wecom_userid) return;
+  localStorage.setItem(userHiddenKey(), JSON.stringify(state.userHidden || []));
+}
+function isHidden(appId) { return (state.userHidden || []).indexOf(appId) !== -1; }
+function canHideApps() { return !!(state.user && state.user.wecom_userid); }
+/* 切换隐藏状态后刷新侧边栏计数与卡片；隐藏的应用从主视图消失，但仍可在「已隐藏」中打开 */
+function toggleHidden(appId) {
+  if (!canHideApps()) return;
+  const i = (state.userHidden || []).indexOf(appId);
+  if (i === -1) state.userHidden.push(appId);
+  else state.userHidden.splice(i, 1);
+  saveUserHidden();
+  renderSidebar(); renderCards(); updateContentTitle();
+}
+/* 当前用户「已隐藏且有权可见」的应用（用于「已隐藏」视图与计数） */
+function hiddenApps() {
+  return state.apps.filter(a => canSeeApp(a, state.user) && isHidden(a.id));
 }
 
 let _dragAppId = null;
@@ -2734,6 +2778,7 @@ async function loadAllData() {
   await applyDefaultAppVisibility();
   loadUserAppSort();
   loadUserCatSort();
+  loadUserHidden();
 }
 
 /* 一次性补丁：把旧种子的 13 个一级分类从「单部门可见」升级为「全公司 + 客户」默认可见。
@@ -2954,6 +2999,22 @@ function renderSidebar() {
   const roots = sortVisibleCatsForSidebar(allRoots);
   roots.forEach(cat => tree.appendChild(buildCatNode(cat)));
   document.getElementById('countAll').textContent = visibleApps().length;
+
+  // 「已隐藏」视图入口：仅对可隐藏的用户（已登录企微账号）显示
+  const hiddenItem = document.getElementById('hiddenItem');
+  if (hiddenItem) {
+    hiddenItem.style.display = canHideApps() ? '' : 'none';
+    const c = document.getElementById('countHidden');
+    if (c) c.textContent = hiddenApps().length;
+  }
+  refreshSidebarActive();
+}
+
+/* 统一刷新侧边栏选中态：清除全部 cat-item 的 active，再点亮当前项 */
+function refreshSidebarActive() {
+  document.querySelectorAll('.cat-item').forEach(el => el.classList.remove('active'));
+  const sel = document.querySelector('.cat-item[data-category="' + state.currentCategory + '"]');
+  if (sel) sel.classList.add('active');
 }
 
 /** 对可见分类应用排序：管理员按 sort_order；普通用户按个人覆盖序 */
@@ -3144,6 +3205,11 @@ function selectCategory(catId) {
 function updateContentTitle() {
   const title = document.getElementById('contentTitle');
   const subtitle = document.getElementById('contentSubtitle');
+  if (state.currentCategory === 'hidden') {
+    title.textContent = '已隐藏的应用';
+    subtitle.textContent = '共 ' + hiddenApps().length + ' 个已隐藏应用 · 点击卡片即可打开，点击眼睛图标可恢复显示';
+    return;
+  }
   if (state.currentCategory === 'all') {
     title.textContent = '全部应用';
     subtitle.textContent = '共 ' + visibleApps().length + ' 个可见应用 · 基于您的权限显示';
@@ -3212,6 +3278,9 @@ function trashIcon() {
 function eyeIcon() {
   return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>';
 }
+function eyeOffIcon() {
+  return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-7-11-7a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 7 11 7a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+}
 function usersIcon() {
   return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>';
 }
@@ -3219,12 +3288,18 @@ function usersIcon() {
 function renderCards() {
   const grid = document.getElementById('cardGrid');
   grid.innerHTML = '';
+  grid.classList.toggle('hidden-view', state.currentCategory === 'hidden');
 
-  let filtered = visibleApps();                 // ★ 权限过滤：不可见应用完全不出现在列表/搜索中
-  if (state.currentCategory !== 'all') {
-    const catIds = getAllDescendantIds(state.currentCategory);
-    catIds.push(state.currentCategory);
-    filtered = filtered.filter(a => catIds.includes(a.category_id));
+  let filtered;
+  if (state.currentCategory === 'hidden') {
+    filtered = hiddenApps();                    // 「已隐藏」视图：仅展示本人隐藏的应用
+  } else {
+    filtered = visibleApps();                   // ★ 权限过滤：不可见应用完全不出现在列表/搜索中
+    if (state.currentCategory !== 'all') {
+      const catIds = getAllDescendantIds(state.currentCategory);
+      catIds.push(state.currentCategory);
+      filtered = filtered.filter(a => catIds.includes(a.category_id));
+    }
   }
   if (state.searchQuery) {
     const q = state.searchQuery.toLowerCase();
@@ -3240,10 +3315,11 @@ function renderCards() {
     const denied = !!curCat && !canSeeCategory(curCat, state.user) && !catHasVisibleAppInSubtree(curCat.id) && !state.searchQuery;
     const empty = document.createElement('div');
     empty.className = 'empty-state';
+    const isHiddenView = state.currentCategory === 'hidden';
     empty.innerHTML =
       '<div class="empty-illus"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></div>' +
-      '<div class="empty-title">' + (state.searchQuery ? '未找到匹配的应用' : (denied ? '该分类未对您开放' : '暂无可见应用')) + '</div>' +
-      '<div class="empty-desc">' + (state.searchQuery ? '试试其他关键词' : (denied ? '一级分类标题对所有用户可见，其中的分类与内容需授权后方可查看，请联系分类负责人。' : '您当前的权限下还没有可查看的应用')) + '</div>';
+      '<div class="empty-title">' + (state.searchQuery ? '未找到匹配的应用' : (isHiddenView ? '暂无隐藏的应用' : (denied ? '该分类未对您开放' : '暂无可见应用'))) + '</div>' +
+      '<div class="empty-desc">' + (state.searchQuery ? '试试其他关键词' : (isHiddenView ? '在任意应用卡片右上角点击「眼睛」图标即可隐藏不想看到的应用，隐藏后仍可在此打开。' : (denied ? '一级分类标题对所有用户可见，其中的分类与内容需授权后方可查看，请联系分类负责人。' : '您当前的权限下还没有可查看的应用'))) + '</div>';
 
     // 在当前分类空状态时直接提供「新建面板」入口（仅该分类可编辑时）
     const canCreateHere = state.currentCategory === 'all'
@@ -3271,13 +3347,21 @@ function renderCards() {
     const canDel  = canDeleteApp(app, state.user);
     const external = isExternallyShared(app);
 
-    // 按钮全开放：非客户用户始终可见编辑/删除按钮；无权限点击时弹窗指引「找谁」
+    // 卡片操作按钮：隐藏功能仅对可隐藏用户（已登录企微账号）开放，不受编辑/删除权限限制
     let actionsHtml = '';
-    if (!isClient(state.user)) {
-      actionsHtml = '<div class="card-actions">' +
-        '<button class="card-action-btn edit" data-id="' + escapeHtml(app.id) + '" title="编辑">' + editIcon() + '</button>' +
-        '<button class="card-action-btn delete" data-id="' + escapeHtml(app.id) + '" title="删除">' + trashIcon() + '</button>' +
-        '</div>';
+    if (canHideApps()) {
+      if (state.currentCategory === 'hidden') {
+        // 「已隐藏」视图：仅提供「恢复显示」按钮（眼睛）
+        actionsHtml = '<div class="card-actions">' +
+          '<button class="card-action-btn restore" data-id="' + escapeHtml(app.id) + '" title="恢复显示">' + eyeIcon() + '</button>' +
+          '</div>';
+      } else {
+        // 常规视图：隐藏按钮（眼睛划掉）+ 编辑 + 删除
+        let s = '<button class="card-action-btn hide" data-id="' + escapeHtml(app.id) + '" title="隐藏此应用">' + eyeOffIcon() + '</button>';
+        if (canEdit) s += '<button class="card-action-btn edit" data-id="' + escapeHtml(app.id) + '" title="编辑">' + editIcon() + '</button>';
+        if (canDel) s += '<button class="card-action-btn delete" data-id="' + escapeHtml(app.id) + '" title="删除">' + trashIcon() + '</button>';
+        actionsHtml = '<div class="card-actions">' + s + '</div>';
+      }
     }
 
     const card = document.createElement('div');
@@ -3314,7 +3398,17 @@ function renderCards() {
       if (e.target.closest('.card-actions')) return;
       openApp(app);
     });
-    if (!isClient(state.user)) {
+    if (canHideApps()) {
+      const hideBtn = card.querySelector('.hide');
+      if (hideBtn) hideBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleHidden(app.id);
+      });
+      const restoreBtn = card.querySelector('.restore');
+      if (restoreBtn) restoreBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleHidden(app.id);
+      });
       const editBtn = card.querySelector('.edit');
       if (editBtn) editBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -3331,8 +3425,8 @@ function renderCards() {
     grid.appendChild(card);
   });
 
-  // 新建卡片：客户除外；浏览特定分类时仅在该分类可编辑时显示
-  if (!isClient(state.user)) {
+  // 新建卡片：客户除外；「已隐藏」视图不显示；浏览特定分类时仅在该分类可编辑时显示
+  if (!isClient(state.user) && state.currentCategory !== 'hidden') {
     const canCreateHere = state.currentCategory === 'all'
       ? getEditableCategories(state.user).length > 0
       : getEditableCategories(state.user).some(c => c.id === state.currentCategory);
@@ -4732,6 +4826,13 @@ function bindEvents() {
   /* 侧边栏「全部应用」 */
   document.querySelector('.cat-item[data-category="all"]').addEventListener('click', () => {
     state.currentCategory = 'all';
+    renderSidebar(); renderCards(); updateContentTitle();
+  });
+
+  /* 侧边栏「已隐藏」 */
+  const hiddenItemEl = document.getElementById('hiddenItem');
+  if (hiddenItemEl) hiddenItemEl.addEventListener('click', () => {
+    state.currentCategory = 'hidden';
     renderSidebar(); renderCards(); updateContentTitle();
   });
 }
